@@ -1,3 +1,15 @@
+new commands:
+BACKEND:
+cd /home/owais/Linux/user-space
+go run ./cmd/fis -config configs/fis.json -http :8090
+
+FRONTEND:
+cd /home/owais/Linux/user-space/web
+npm install
+npm run dev
+
+(down commands are not required to be run)
+________________________________________________________
 cd /home/owais/Linux/user-space
 sudo go run ./cmd/fis -config configs/fis.json
 
@@ -16,3 +28,6 @@ _________________________________________________________
 cd /home/owais/Linux/user-space
 go run ./cmd/fisctl status -config configs/fis.json
 go run ./cmd/fisctl events -config configs/fis.json -n 20
+
+
+
