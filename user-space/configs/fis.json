@@ -1,0 +1,55 @@
+{
+  "poll_interval_seconds": 2,
+  "log_file": "fis.log",
+  "status_file": "fis-status.json",
+  "cgroup_root": "",
+  "defaults": {
+    "cpu_spike_percent": 80,
+    "memory_overuse_bytes": 200000000,
+    "actions": {
+      "crash": "restart",
+      "cpu_spike": "quarantine",
+      "memory_overuse": "kill"
+    },
+    "restart": {
+      "max_attempts": 3,
+      "window_seconds": 60,
+      "backoff_seconds": 5
+    },
+    "cgroup": {
+      "cpu_max": "100000 100000",
+      "memory_max_bytes": 300000000
+    }
+  },
+  "targets": [
+    {
+      "name": "fisdemo",
+      "match": {
+        "name": "fisdemo",
+        "cmdline_contains": "",
+        "regex": ""
+      },
+      "command": [
+        "./fisdemo",
+        "-mode",
+        "cpu"
+      ],
+      "cpu_spike_percent": 50,
+      "memory_overuse_bytes": 15000000,
+      "actions": {
+        "crash": "restart",
+        "cpu_spike": "quarantine",
+        "memory_overuse": "kill"
+      },
+      "restart": {
+        "max_attempts": 5,
+        "window_seconds": 120,
+        "backoff_seconds": 2
+      },
+      "cgroup": {
+        "cpu_max": "50000 100000",
+        "memory_max_bytes": 200000000
+      }
+    }
+  ]
+}

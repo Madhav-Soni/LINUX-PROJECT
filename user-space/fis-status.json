@@ -1,0 +1,31 @@
+{
+  "timestamp": "2026-05-02T13:55:52.883086716Z",
+  "targets": [
+    {
+      "name": "fisdemo",
+      "processes": [
+        {
+          "pid": 58913,
+          "name": "fisdemo",
+          "cmdline": "./fisdemo -mode cpu",
+          "cpu_percent": 17.69134253450439,
+          "memory_bytes": 5836800
+        },
+        {
+          "pid": 58997,
+          "name": "fisdemo",
+          "cmdline": "./fisdemo -mode cpu",
+          "cpu_percent": 17.8168130489335,
+          "memory_bytes": 5238784
+        },
+        {
+          "pid": 59256,
+          "name": "fisdemo",
+          "cmdline": "./fisdemo -mode cpu",
+          "cpu_percent": 17.8168130489335,
+          "memory_bytes": 5238784
+        }
+      ]
+    }
+  ]
+}

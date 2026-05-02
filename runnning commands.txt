@@ -1,0 +1,18 @@
+cd /home/owais/Linux/user-space
+sudo go run ./cmd/fis -config configs/fis.json
+
+or 
+
+sudo /usr/local/go/bin/go run ./cmd/fis -config configs/fis.json
+
+
+________________________________________________________
+
+cd /home/owais/Linux/user-space
+./fisdemo -mode mem -mem-mb 400
+
+_________________________________________________________
+
+cd /home/owais/Linux/user-space
+go run ./cmd/fisctl status -config configs/fis.json
+go run ./cmd/fisctl events -config configs/fis.json -n 20
