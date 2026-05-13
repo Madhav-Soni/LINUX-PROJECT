@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/owais/fis/user-space/internal/config"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/config"
 )
 
 type logEntry struct {

@@ -3,8 +3,8 @@ package httpapi
 import (
 	"net/http"
 
-	"github.com/owais/fis/user-space/internal/app"
-	"github.com/owais/fis/user-space/internal/eventstream"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/app"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/eventstream"
 )
 
 type Dependencies struct {

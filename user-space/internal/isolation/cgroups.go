@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/owais/fis/user-space/internal/config"
-	"github.com/owais/fis/user-space/internal/logger"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/config"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/logger"
 )
 
 type Manager struct {

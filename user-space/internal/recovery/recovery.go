@@ -7,11 +7,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/owais/fis/user-space/internal/config"
-	"github.com/owais/fis/user-space/internal/events"
-	"github.com/owais/fis/user-space/internal/isolation"
-	"github.com/owais/fis/user-space/internal/logger"
-	"github.com/owais/fis/user-space/internal/policy"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/config"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/events"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/isolation"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/logger"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/policy"
 )
 
 type Engine struct {

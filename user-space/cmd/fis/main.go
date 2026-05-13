@@ -11,17 +11,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/owais/fis/user-space/internal/app"
-	"github.com/owais/fis/user-space/internal/config"
-	"github.com/owais/fis/user-space/internal/detector"
-	"github.com/owais/fis/user-space/internal/events"
-	"github.com/owais/fis/user-space/internal/eventstream"
-	"github.com/owais/fis/user-space/internal/httpapi"
-	"github.com/owais/fis/user-space/internal/logger"
-	"github.com/owais/fis/user-space/internal/monitor"
-	"github.com/owais/fis/user-space/internal/policy"
-	"github.com/owais/fis/user-space/internal/recovery"
-	"github.com/owais/fis/user-space/internal/state"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/app"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/config"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/detector"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/events"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/eventstream"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/httpapi"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/logger"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/monitor"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/policy"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/recovery"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/state"
 )
 
 func main() {

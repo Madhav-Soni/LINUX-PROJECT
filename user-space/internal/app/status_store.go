@@ -3,7 +3,7 @@ package app
 import (
 	"sync"
 
-	"github.com/owais/fis/user-space/internal/state"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/state"
 )
 
 type StatusStore struct {

@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/owais/fis/user-space/internal/events"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/events"
 )
 
 type Kind string

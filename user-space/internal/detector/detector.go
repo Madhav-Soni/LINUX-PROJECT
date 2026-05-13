@@ -3,9 +3,9 @@ package detector
 import (
 	"time"
 
-	"github.com/owais/fis/user-space/internal/events"
-	"github.com/owais/fis/user-space/internal/monitor"
-	"github.com/owais/fis/user-space/internal/policy"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/events"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/monitor"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/policy"
 )
 
 type Result struct {

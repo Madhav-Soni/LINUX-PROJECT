@@ -5,9 +5,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/owais/fis/user-space/internal/config"
-	"github.com/owais/fis/user-space/internal/events"
-	"github.com/owais/fis/user-space/internal/monitor"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/config"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/events"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/monitor"
 )
 
 type ActionType string
