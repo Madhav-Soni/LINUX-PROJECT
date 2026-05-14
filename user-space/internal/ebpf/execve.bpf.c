@@ -9,9 +9,10 @@ typedef unsigned char u8;
 
 /* Must match rawEvent in tracer.go exactly (byte layout) */
 struct event_t {
+    u64 timestamp;
     u32 pid;
-    u8  comm[16];
-    u64 timestamp;  /* ktime nanoseconds */
+    u8 comm[16];
+    u8 _pad[4];
 };
 
 struct {

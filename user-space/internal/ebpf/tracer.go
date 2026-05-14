@@ -24,9 +24,10 @@ type ExecveEvent struct {
 
 // rawEvent must match struct event_t in execve.bpf.c byte-for-byte.
 type rawEvent struct {
-	PID       uint32
-	Comm      [16]byte
-	Timestamp uint64
+    Timestamp uint64
+    PID       uint32
+    Comm      [16]byte
+    Pad       [4]byte
 }
 
 // Tracer loads and runs the eBPF execve tracer.
