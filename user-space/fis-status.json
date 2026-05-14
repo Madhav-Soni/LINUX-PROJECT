@@ -1,17 +1,4 @@
 {
-  "timestamp": "2026-05-13T16:39:11.698850468Z",
-  "targets": [
-    {
-      "name": "fisdemo",
-      "processes": [
-        {
-          "pid": 2123,
-          "name": "fisdemo",
-          "cmdline": "./fisdemo -mode cpu",
-          "cpu_percent": 9.363295880149813,
-          "memory_bytes": 3514368
-        }
-      ]
-    }
-  ]
+  "timestamp": "2026-05-14T06:38:38.852046543Z",
+  "targets": []
 }
