@@ -10,10 +10,10 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
-
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/app"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/config"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/detector"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/ebpf"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/events"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/eventstream"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/httpapi"
@@ -45,6 +45,19 @@ func main() {
 
 	eventStore := eventstream.NewStore(200)
 	statusStore := &app.StatusStore{}
+
+	// --- eBPF Phase 1: execve tracer ---
+	ebpfStore := ebpf.NewStore()
+	tracer, err := ebpf.New(ebpfStore)
+	if err != nil {
+		// Non-fatal: log and continue without eBPF if kernel doesn't support it.
+		fmt.Fprintf(os.Stderr, "WARNING: eBPF tracer disabled: %v\n", err)
+	} else {
+		defer tracer.Close()
+		go tracer.Run()
+		fmt.Println("eBPF execve tracer running")
+	}
+
 	actionObserver := recovery.ActionObserver(func(event events.FaultEvent, result recovery.ActionResult) {
 		if result.Type == policy.ActionNone {
 			return
@@ -83,6 +96,7 @@ func main() {
 			Status:     statusStore,
 			Events:     eventStore,
 			Demos:      demoManager,
+			EBPFStore:  ebpfStore,
 		})
 		server = &http.Server{
 			Addr:              *httpAddr,

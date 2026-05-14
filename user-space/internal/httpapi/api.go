@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/app"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/ebpf"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/eventstream"
 )
 
@@ -13,6 +14,7 @@ type Dependencies struct {
 	Status     *app.StatusStore
 	Events     *eventstream.Store
 	Demos      *DemoManager
+	EBPFStore  *ebpf.Store
 }
 
 func NewHandler(deps Dependencies) http.Handler {
@@ -31,6 +33,7 @@ func NewHandler(deps Dependencies) http.Handler {
 	mux.HandleFunc("/api/v1/events/stream", api.handleEventsStream)
 	mux.HandleFunc("/api/v1/demos", api.handleDemos)
 	mux.HandleFunc("/api/v1/demos/", api.handleDemoByPID)
+	RegisterSyscallRoutes(mux, deps.EBPFStore)
 
 	return withCORS(mux)
 }
