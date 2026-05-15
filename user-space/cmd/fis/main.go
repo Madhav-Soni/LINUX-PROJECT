@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/app"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/config"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/detector"
@@ -20,6 +21,7 @@ import (
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/logger"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/monitor"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/policy"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/procwatch"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/recovery"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/state"
 )
@@ -84,6 +86,13 @@ func main() {
 
 	det := detector.New()
 
+	// --- procwatch: lifecycle-fault detector (zombie / orphan / signal-death) ---
+	pwNotifier := procwatch.NewNotifier(
+		procwatch.NewDetector(0), // 0 → default zombie-age threshold (3 s)
+		eventStore,
+		log,
+	)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -126,6 +135,7 @@ func main() {
 			log.Error("status write failed", map[string]interface{}{"error": err.Error()})
 		}
 
+		// ── existing fault events (cpu/mem/crash) ─────────────────────────────
 		for _, event := range result.Events {
 			eventStore.Publish(eventstream.NewFaultEvent(event))
 			log.Info("fault event", map[string]interface{}{
@@ -150,6 +160,26 @@ func main() {
 			plan := engine.ActionForEvent(target, policyCfg, event)
 			if err := rec.Execute(event, plan); err != nil {
 				log.Error("action failed", map[string]interface{}{"error": err.Error(), "target": event.Target})
+			}
+		}
+
+		// ── procwatch lifecycle faults (zombie / orphan / parent-exit / signal) ──
+		pwFaults := pwNotifier.Notify(snapshot, matches)
+		for _, event := range pwFaults {
+			// Route lifecycle faults through the policy/recovery engine as well
+			// so that operators can configure restart/kill actions for them.
+			target := engine.TargetByName(event.Target)
+			if target == nil {
+				continue
+			}
+			policyCfg := engine.EffectivePolicy(target)
+			plan := engine.ActionForEvent(target, policyCfg, event)
+			if err := rec.Execute(event, plan); err != nil {
+				log.Error("procwatch action failed", map[string]interface{}{
+					"error":  err.Error(),
+					"target": event.Target,
+					"type":   event.Type,
+				})
 			}
 		}
 	}

@@ -35,7 +35,7 @@
         "cpu"
       ],
       "cpu_spike_percent": 50,
-      "memory_overuse_bytes": 15000000,
+      "memory_overuse_bytes": 15000,
       "actions": {
         "crash": "restart",
         "cpu_spike": "quarantine",
