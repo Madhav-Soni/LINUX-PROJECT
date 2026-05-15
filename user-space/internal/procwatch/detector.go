@@ -19,6 +19,12 @@ type Detector struct {
 	zombieAge  time.Duration
 }
 
+// Tracker returns the underlying Tracker so callers can introspect the live
+// process registry (e.g. for the /api/v1/procwatch/processes HTTP endpoint).
+func (d *Detector) Tracker() *Tracker {
+	return d.tracker
+}
+
 // NewDetector allocates a Detector.
 //
 //   - zombieAge: how long a process must be in state Z before a LongZombie

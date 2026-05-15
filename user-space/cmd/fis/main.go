@@ -87,8 +87,10 @@ func main() {
 	det := detector.New()
 
 	// --- procwatch: lifecycle-fault detector (zombie / orphan / signal-death) ---
+	pwDetector := procwatch.NewDetector(0) // 0 → default zombie-age threshold (3 s)
+	pwTracker := pwDetector.Tracker()      // expose tracker for /api/v1/procwatch/processes
 	pwNotifier := procwatch.NewNotifier(
-		procwatch.NewDetector(0), // 0 → default zombie-age threshold (3 s)
+		pwDetector,
 		eventStore,
 		log,
 	)
@@ -100,12 +102,13 @@ func main() {
 	if *httpAddr != "" {
 		demoManager := httpapi.NewDemoManager("fisdemo")
 		handler := httpapi.NewHandler(httpapi.Dependencies{
-			ConfigPath: *configPath,
-			Runtime:    runtime,
-			Status:     statusStore,
-			Events:     eventStore,
-			Demos:      demoManager,
-			EBPFStore:  ebpfStore,
+			ConfigPath:       *configPath,
+			Runtime:          runtime,
+			Status:           statusStore,
+			Events:           eventStore,
+			Demos:            demoManager,
+			EBPFStore:        ebpfStore,
+			ProcwatchTracker: pwTracker,
 		})
 		server = &http.Server{
 			Addr:              *httpAddr,

@@ -6,15 +6,17 @@ import (
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/app"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/ebpf"
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/eventstream"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/procwatch"
 )
 
 type Dependencies struct {
-	ConfigPath string
-	Runtime    *app.Runtime
-	Status     *app.StatusStore
-	Events     *eventstream.Store
-	Demos      *DemoManager
-	EBPFStore  *ebpf.Store
+	ConfigPath      string
+	Runtime         *app.Runtime
+	Status          *app.StatusStore
+	Events          *eventstream.Store
+	Demos           *DemoManager
+	EBPFStore       *ebpf.Store
+	ProcwatchTracker *procwatch.Tracker // may be nil; enables /api/v1/procwatch/* routes
 }
 
 func NewHandler(deps Dependencies) http.Handler {
@@ -34,6 +36,9 @@ func NewHandler(deps Dependencies) http.Handler {
 	mux.HandleFunc("/api/v1/demos", api.handleDemos)
 	mux.HandleFunc("/api/v1/demos/", api.handleDemoByPID)
 	RegisterSyscallRoutes(mux, deps.EBPFStore)
+
+	// Procwatch lifecycle-monitoring routes (always registered; tracker may be nil).
+	RegisterProcwatchRoutes(mux, deps.Events, deps.ProcwatchTracker)
 
 	return withCORS(mux)
 }
