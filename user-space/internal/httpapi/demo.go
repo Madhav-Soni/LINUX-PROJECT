@@ -45,7 +45,19 @@ func (m *DemoManager) Start(mode string, memMB int) (int, string, error) {
 	}
 
 	mode = normalizeMode(mode)
-	if mode != "cpu" && mode != "mem" && mode != "crash" {
+	switch mode {
+	case
+		"cpu",
+		"mem",
+		"crash",
+		"zombie",
+		"orphan",
+		"parent-nowait",
+		"sigkill",
+		"sigterm",
+		"sigsegv",
+		"sigabrt":
+	default:
 		return 0, "", fmt.Errorf("unsupported mode: %s", mode)
 	}
 
@@ -109,8 +121,8 @@ func resolveDemoBinary(binary string) (string, error) {
 	if err == nil {
 		return path, nil
 	}
-	if _, statErr := os.Stat("./" + binary); statErr == nil {
-		return "./" + binary, nil
+	if _, statErr := os.Stat("/app/user-space/fisdemo"); statErr == nil {
+		return "/app/user-space/fisdemo", nil
 	}
 	return "", fmt.Errorf("%w: %s", errDemoNotFound, binary)
 }
