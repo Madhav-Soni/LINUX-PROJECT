@@ -1,198 +1,209 @@
+//go:build linux
+
 package procwatch
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/events"
-	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/monitor"
-	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/policy"
 )
 
-// Detector wraps a Tracker and converts lifecycle Deltas into events.FaultEvent
-// values for any process that is currently matched by the policy engine.
+// LifecycleEvent is a process-lifecycle fault detected by the Detector.
+// It is distinct from events.FaultEvent (used by the memory/CPU detector) so
+// that the two subsystems can evolve independently.
+type LifecycleEvent struct {
+	ID         string           `json:"id"`
+	Timestamp  time.Time        `json:"timestamp"`
+	Type       events.FaultType `json:"type"`
+	Severity   events.Severity  `json:"severity"`
+	Message    string           `json:"message"`
+	PID        int              `json:"pid"`
+	PPID       int              `json:"ppid,omitempty"`
+	Signal     int              `json:"signal,omitempty"`
+	SignalName string           `json:"signal_name,omitempty"`
+}
+
+// signalNames maps common Linux signal numbers to their names.
+var signalNames = map[int]string{
+	1:  "SIGHUP",
+	2:  "SIGINT",
+	3:  "SIGQUIT",
+	4:  "SIGILL",
+	6:  "SIGABRT",
+	8:  "SIGFPE",
+	9:  "SIGKILL",
+	11: "SIGSEGV",
+	13: "SIGPIPE",
+	15: "SIGTERM",
+	17: "SIGCHLD",
+	19: "SIGSTOP",
+}
+
+// sigName resolves a signal number to a printable name.
+func sigName(n int) string {
+	if s, ok := signalNames[n]; ok {
+		return s
+	}
+	return fmt.Sprintf("SIG%d", n)
+}
+
+// Detector analyses each poll cycle's Tracker data and emits LifecycleEvents
+// when process-lifecycle faults are detected.
 //
-// It is intentionally stateless beyond the embedded Tracker so that the caller
-// (detector.Detector or main.go) can decide how to route the produced events.
+// Detection rules implemented:
+//  1. Zombie    – process state == "Z"
+//  2. Orphan    – PPID flipped to 1 (re-parented to init/systemd)
+//  3. ParentNoWait – a parent PID disappeared while live children remain
+//  4. ChildKilled  – a process disappeared with a kill-type exit signal
 type Detector struct {
-	tracker    *Tracker
-	zombieAge  time.Duration
+	mu          sync.Mutex
+	seenZombies map[int]bool // PIDs already reported as zombie
+	seenOrphans map[int]bool // PIDs already reported as orphan
+	prevPPID    map[int]int  // PPID as of the previous poll
 }
 
-// Tracker returns the underlying Tracker so callers can introspect the live
-// process registry (e.g. for the /api/v1/procwatch/processes HTTP endpoint).
-func (d *Detector) Tracker() *Tracker {
-	return d.tracker
-}
-
-// NewDetector allocates a Detector.
-//
-//   - zombieAge: how long a process must be in state Z before a LongZombie
-//     alert is raised.  Pass 0 to use the default (3 s).
-func NewDetector(zombieAge time.Duration) *Detector {
+// NewDetector returns an initialised Detector.
+func NewDetector() *Detector {
 	return &Detector{
-		tracker:   New(),
-		zombieAge: zombieAge,
+		seenZombies: make(map[int]bool),
+		seenOrphans: make(map[int]bool),
+		prevPPID:    make(map[int]int),
 	}
 }
 
-// Detect runs one poll cycle.
+// Analyse compares the current Tracker state against the previous cycle's
+// state and emits zero or more LifecycleEvents describing detected faults.
 //
-//   - snapshot : current monitor.Snapshot (from monitor.ReadSnapshot)
-//   - matches  : map[pid]*policy.Target from engine.MatchProcesses
-//
-// Returns a (possibly empty) slice of FaultEvents ready to be published.
-func (d *Detector) Detect(
-	snapshot monitor.Snapshot,
-	matches map[int]*policy.Target,
-) []events.FaultEvent {
+// appeared and disappeared are the PID lists returned by Tracker.Refresh().
+func (d *Detector) Analyse(tracker *Tracker, appeared, disappeared []int) []LifecycleEvent {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
-	// Convert monitor.ProcessSnapshot → ProcEntry for the tracker.
-	procs := make([]ProcEntry, 0, len(snapshot.Processes))
-	for _, p := range snapshot.Processes {
-		procs = append(procs, ProcEntry{
-			PID:        p.PID,
-			PPID:       p.PPID,
-			Name:       p.Name,
-			State:      p.State,
-			ExitSignal: p.ExitSignal,
+	// Build a fast PID -> info lookup for the current cycle.
+	all := tracker.All()
+	liveByPID := make(map[int]*ProcessInfo, len(all))
+	for _, p := range all {
+		if p.Alive {
+			liveByPID[p.PID] = p
+		}
+	}
+
+	var evts []LifecycleEvent
+
+	// ── 1. Zombie detection ───────────────────────────────────────────────────
+	// A zombie stays in /proc with state "Z" until the parent calls wait().
+	for _, p := range liveByPID {
+		if !p.IsZombie() || d.seenZombies[p.PID] {
+			continue
+		}
+		d.seenZombies[p.PID] = true
+		evts = append(evts, LifecycleEvent{
+			ID:        events.NewID(),
+			Timestamp: time.Now().UTC(),
+			Type:      events.FaultZombie,
+			Severity:  events.SeverityWarn,
+			Message: fmt.Sprintf(
+				"[WARNING] Zombie process detected: %s (PID %d) is in state Z — not reaped by parent (PPID %d)",
+				p.Name, p.PID, p.PPID,
+			),
+			PID:  p.PID,
+			PPID: p.PPID,
 		})
 	}
 
-	delta := d.tracker.Update(snapshot.Timestamp, procs, d.zombieAge)
-
-	var out []events.FaultEvent
-
-	// Helper: only emit if the PID (or its parent) is a watched target.
-	watchedTarget := func(pid int) string {
-		if t := matches[pid]; t != nil {
-			return t.Config.Name
-		}
-		return ""
-	}
-
-	// ── Zombie events ─────────────────────────────────────────────────────────
-	for _, e := range delta.NewZombies {
-		target := watchedTarget(e.PID)
-		if target == "" {
+	// ── 2. Orphan detection ───────────────────────────────────────────────────
+	// An orphan is a process whose PPID flipped to 1 — its original parent
+	// exited and init (PID 1) adopted it.
+	for _, p := range liveByPID {
+		if p.PID <= 1 {
 			continue
 		}
-		out = append(out, newLifecycleEvent(
-			target, e.PID, e.PPID, 0,
-			events.FaultZombie, events.SeverityWarn,
-			fmt.Sprintf("process %d (%s) entered zombie state; parent %d has not called wait()", e.PID, e.Name, e.PPID),
-			0,
-		))
+		prev, hasPrev := d.prevPPID[p.PID]
+		d.prevPPID[p.PID] = p.PPID
+
+		if hasPrev && prev > 1 && p.PPID == 1 && !d.seenOrphans[p.PID] {
+			d.seenOrphans[p.PID] = true
+			evts = append(evts, LifecycleEvent{
+				ID:        events.NewID(),
+				Timestamp: time.Now().UTC(),
+				Type:      events.FaultOrphan,
+				Severity:  events.SeverityWarn,
+				Message: fmt.Sprintf(
+					"[WARNING] Orphan process: %s (PID %d) re-parented to init — original parent (PPID %d) exited without wait()",
+					p.Name, p.PID, prev,
+				),
+				PID:  p.PID,
+				PPID: prev,
+			})
+		}
 	}
-	for _, e := range delta.LongZombies {
-		target := watchedTarget(e.PID)
-		if target == "" {
+
+	// ── 3. Parent-exited-without-wait detection ───────────────────────────────
+	// When a parent PID disappears from /proc while its live children still
+	// report that PPID (briefly, before init adoption completes), we flag the
+	// parent exit as a failure to call wait().
+	for _, pid := range disappeared {
+		parentProc, ok := tracker.Get(pid)
+		if !ok {
 			continue
 		}
-		out = append(out, newLifecycleEvent(
-			target, e.PID, e.PPID, 0,
-			events.FaultZombie, events.SeverityCritical,
-			fmt.Sprintf("process %d (%s) remains zombie for %.1fs; parent %d still has not reaped it",
-				e.PID, e.Name, time.Since(e.ZombieSince).Seconds(), e.PPID),
-			time.Since(e.ZombieSince),
-		))
+		for _, child := range liveByPID {
+			// Check current PPID or the previous-cycle PPID for this child.
+			prev := d.prevPPID[child.PID]
+			if child.PPID == pid || prev == pid {
+				evts = append(evts, LifecycleEvent{
+					ID:        events.NewID(),
+					Timestamp: time.Now().UTC(),
+					Type:      events.FaultParentNoWait,
+					Severity:  events.SeverityCritical,
+					Message: fmt.Sprintf(
+						"[WARNING] Parent process %s (PID %d) exited without waiting for child process (PID %d)",
+						parentProc.Name, pid, child.PID,
+					),
+					PID:  child.PID,
+					PPID: pid,
+				})
+			}
+		}
 	}
 
-	// ── Orphan events ─────────────────────────────────────────────────────────
-	for _, e := range delta.Orphans {
-		target := watchedTarget(e.PID)
-		if target == "" {
+	// ── 4. Abrupt child termination ───────────────────────────────────────────
+	// When a process disappears with a kill-type signal recorded in its stat,
+	// emit a child-killed alert.
+	for _, pid := range disappeared {
+		proc, ok := tracker.Get(pid)
+		if !ok || proc.TermSignal <= 0 {
 			continue
 		}
-		out = append(out, newLifecycleEvent(
-			target, e.PID, e.PPID, 0,
-			events.FaultOrphan, events.SeverityWarn,
-			fmt.Sprintf("process %d (%s) orphaned: re-parented to PID 1 after parent %d exited", e.PID, e.Name, e.PPID),
-			0,
-		))
-	}
-
-	// ── Parent-exit-without-wait events ──────────────────────────────────────
-	for _, e := range delta.ParentExits {
-		target := watchedTarget(e.PID)
-		if target == "" {
-			// Also fire if the *parent* was a watched process.
-			target = watchedTarget(e.PPID)
+		switch proc.TermSignal {
+		case 6, 9, 11, 15: // SIGABRT, SIGKILL, SIGSEGV, SIGTERM
+			name := sigName(proc.TermSignal)
+			evts = append(evts, LifecycleEvent{
+				ID:        events.NewID(),
+				Timestamp: time.Now().UTC(),
+				Type:      events.FaultChildKilled,
+				Severity:  events.SeverityCritical,
+				Message: fmt.Sprintf(
+					"[ALERT] Child process %s (PID %d) terminated unexpectedly via %s",
+					proc.Name, pid, name,
+				),
+				PID:        pid,
+				PPID:       proc.PPID,
+				Signal:     proc.TermSignal,
+				SignalName: name,
+			})
 		}
-		if target == "" {
-			continue
-		}
-		out = append(out, newLifecycleEvent(
-			target, e.PID, e.PPID, 0,
-			events.FaultParentExit, events.SeverityWarn,
-			fmt.Sprintf("parent %d of process %d (%s) exited without reaping the child", e.PPID, e.PID, e.Name),
-			0,
-		))
 	}
 
-	// ── Signal-death events ───────────────────────────────────────────────────
-	for _, e := range delta.SignalDeaths {
-		target := watchedTarget(e.PID)
-		if target == "" {
-			continue
-		}
-		sigName := signalName(e.ExitSignal)
-		sev := events.SeverityWarn
-		if e.ExitSignal == 9 { // SIGKILL
-			sev = events.SeverityCritical
-		}
-		out = append(out, newLifecycleEvent(
-			target, e.PID, e.PPID, e.ExitSignal,
-			events.FaultSignalDeath, sev,
-			fmt.Sprintf("process %d (%s) killed by %s (signal %d)", e.PID, e.Name, sigName, e.ExitSignal),
-			0,
-		))
+	// ── Housekeeping ──────────────────────────────────────────────────────────
+	// Remove dead PIDs from tracking maps to prevent unbounded growth.
+	for _, pid := range disappeared {
+		delete(d.seenZombies, pid)
+		delete(d.seenOrphans, pid)
+		delete(d.prevPPID, pid)
 	}
 
-	return out
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-func newLifecycleEvent(
-	target string,
-	pid, ppid, signal int,
-	faultType events.FaultType,
-	severity events.Severity,
-	message string,
-	zombieDur time.Duration,
-) events.FaultEvent {
-	id := events.NewID()
-	return events.FaultEvent{
-		ID:             id,
-		CorrelationID:  id,
-		Timestamp:      time.Now().UTC(),
-		Target:         target,
-		PID:            pid,
-		Type:           faultType,
-		Severity:       severity,
-		Message:        message,
-		ParentPID:      ppid,
-		Signal:         signal,
-		ZombieDuration: zombieDur,
-	}
-}
-
-// signalName returns the conventional name for common Linux signal numbers.
-func signalName(sig int) string {
-	names := map[int]string{
-		1:  "SIGHUP",
-		2:  "SIGINT",
-		3:  "SIGQUIT",
-		6:  "SIGABRT",
-		9:  "SIGKILL",
-		11: "SIGSEGV",
-		13: "SIGPIPE",
-		14: "SIGALRM",
-		15: "SIGTERM",
-	}
-	if name, ok := names[sig]; ok {
-		return name
-	}
-	return fmt.Sprintf("SIG(%d)", sig)
+	return evts
 }

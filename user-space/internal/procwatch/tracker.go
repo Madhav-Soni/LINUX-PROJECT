@@ -1,223 +1,257 @@
-// Package procwatch tracks per-process parent-child relationships and lifetime
-// state across successive /proc poll cycles.  It is the stateful component
-// that feeds zombie, orphan, parent-exit, and signal-death detection.
+//go:build linux
+
+// Package procwatch implements runtime process-lifecycle monitoring by polling
+// the Linux /proc filesystem. It detects zombie processes, orphan processes,
+// parents that exit without calling wait(), and abrupt child termination via
+// signal delivery.
 package procwatch
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
-// Entry holds the last-known lifecycle state of a single process.
-type Entry struct {
-	PID  int
-	PPID int
-	Name string
-
-	// FirstSeen is the wall-clock time at which this PID was first observed.
-	FirstSeen time.Time
-
-	// ZombieSince is non-zero when the process was first observed in state "Z".
-	// Reset to zero if the process leaves Z (e.g. parent finally reaps it).
-	ZombieSince time.Time
-
-	// ExitSignal is the signal extracted from /proc/<pid>/stat on the last poll
-	// in which the process was alive.
-	ExitSignal int
-
-	// Alive is false once the PID disappears from /proc.
-	Alive bool
+// ProcessInfo is the runtime record maintained for each observed PID.
+type ProcessInfo struct {
+	PID        int       `json:"pid"`
+	PPID       int       `json:"ppid"`
+	Name       string    `json:"name"`
+	State      string    `json:"state"`   // R S D Z T X (Linux single-char state)
+	Cmdline    string    `json:"cmdline"`
+	SeenAt     time.Time `json:"seen_at"`
+	Alive      bool      `json:"alive"`
+	TermSignal int       `json:"term_signal,omitempty"` // last known exit signal
 }
 
-// ProcEntry is a minimal snapshot of a process as seen in the current poll.
-// Callers fill this from monitor.ProcessSnapshot.
-type ProcEntry struct {
-	PID        int
-	PPID       int
-	Name       string
-	State      string // single-char kernel state: R, S, D, Z, T, X …
-	ExitSignal int
+// IsZombie reports whether the process is in the zombie (Z) state.
+func (p *ProcessInfo) IsZombie() bool { return p.State == "Z" }
+
+// StateLabel returns a human-readable process state description.
+func (p *ProcessInfo) StateLabel() string {
+	switch p.State {
+	case "R":
+		return "running"
+	case "S":
+		return "sleeping"
+	case "D":
+		return "disk-wait"
+	case "Z":
+		return "zombie"
+	case "T":
+		return "stopped"
+	case "X":
+		return "dead"
+	default:
+		return p.State
+	}
 }
 
-// Tracker maintains a map[PID]Entry and exposes per-cycle deltas.
-// All public methods are goroutine-safe.
+// Tracker maintains a live, thread-safe registry of all processes observed via
+// /proc. Call Refresh() on every poll tick to update the registry.
 type Tracker struct {
-	mu      sync.Mutex
-	entries map[int]*Entry
+	mu        sync.RWMutex
+	processes map[int]*ProcessInfo
 }
 
-// New allocates a ready-to-use Tracker.
-func New() *Tracker {
-	return &Tracker{
-		entries: make(map[int]*Entry),
-	}
+// NewTracker returns an initialised, empty Tracker.
+func NewTracker() *Tracker {
+	return &Tracker{processes: make(map[int]*ProcessInfo)}
 }
 
-// Delta describes lifecycle transitions detected during one Update call.
-type Delta struct {
-	// NewZombies lists PIDs that entered state "Z" this cycle.
-	NewZombies []Entry
-
-	// LongZombies lists PIDs that have been in state "Z" for more than the
-	// supplied threshold (they already appeared in a previous NewZombies list).
-	LongZombies []Entry
-
-	// Orphans lists PIDs whose PPID changed to 1 (or whose parent is no longer
-	// alive in the current snapshot) since the last poll.
-	Orphans []Entry
-
-	// ParentExits lists child PIDs whose direct parent PID disappeared from
-	// /proc this cycle (parent exited without a prior graceful reaping).
-	ParentExits []Entry
-
-	// SignalDeaths lists PIDs that disappeared from /proc and had a non-zero
-	// ExitSignal recorded during the last cycle they were alive.
-	SignalDeaths []Entry
-
-	// Vanished lists all PIDs that were alive last cycle and are gone now,
-	// regardless of cause.  Callers may use this for generic crash detection
-	// without double-counting the more specific categories above.
-	Vanished []Entry
-}
-
-// Update ingests the current-cycle process list and returns lifecycle deltas.
-//
-//   - now         – current wall-clock time (allows unit testing with fixed clocks)
-//   - procs       – all processes visible in /proc this cycle
-//   - zombieAge   – how long a zombie must persist before it appears in
-//     Delta.LongZombies (0 → use default of 3 s)
-func (t *Tracker) Update(now time.Time, procs []ProcEntry, zombieAge time.Duration) Delta {
-	if zombieAge <= 0 {
-		zombieAge = 3 * time.Second
-	}
+// Refresh scans /proc, updates the internal registry, and returns the PIDs
+// that appeared (new) and disappeared (exited) since the previous call.
+func (t *Tracker) Refresh() (appeared, disappeared []int) {
+	current := readAllProcs()
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// Index current snapshot by PID.
-	currentByPID := make(map[int]ProcEntry, len(procs))
-	for _, p := range procs {
-		currentByPID[p.PID] = p
-	}
-
-	// Build a set of PIDs that are alive this cycle for fast parent-liveness
-	// queries.
-	alivePIDs := make(map[int]struct{}, len(procs))
-	for _, p := range procs {
-		alivePIDs[p.PID] = struct{}{}
-	}
-
-	var d Delta
-
-	// ── 1. Detect transitions for processes alive in the *previous* cycle ────
-	for pid, prev := range t.entries {
-		if !prev.Alive {
-			continue
-		}
-		cur, stillAlive := currentByPID[pid]
-		if !stillAlive {
-			// Process vanished.
-			prev.Alive = false
-			t.entries[pid] = prev
-			d.Vanished = append(d.Vanished, *prev)
-
-			if prev.ExitSignal != 0 {
-				d.SignalDeaths = append(d.SignalDeaths, *prev)
-			}
-			continue
-		}
-
-		// Still alive – check PPID change (orphan / parent-exit).
-		if cur.PPID != prev.PPID {
-			if cur.PPID == 1 {
-				// Re-parented to init → classic orphan.
-				d.Orphans = append(d.Orphans, *prev)
-			} else {
-				// PPID changed to something other than 1.  If the old parent is
-				// gone, that's a parent-exit-without-wait scenario.
-				if _, parentAlive := alivePIDs[prev.PPID]; !parentAlive {
-					d.ParentExits = append(d.ParentExits, *prev)
-				}
-			}
-		} else {
-			// Same PPID – but if parent is gone now, it's a parent exit.
-			if prev.PPID > 1 {
-				if _, parentAlive := alivePIDs[prev.PPID]; !parentAlive {
-					d.ParentExits = append(d.ParentExits, *prev)
-				}
-			}
-		}
-
-		// Update entry.
-		prev.PPID = cur.PPID
-		prev.ExitSignal = cur.ExitSignal
-
-		// Zombie state tracking.
-		if cur.State == "Z" {
-			if prev.ZombieSince.IsZero() {
-				// First cycle in Z.
-				prev.ZombieSince = now
-				d.NewZombies = append(d.NewZombies, *prev)
-			} else if now.Sub(prev.ZombieSince) >= zombieAge {
-				// Has been Z for long enough to warrant a repeated alert.
-				d.LongZombies = append(d.LongZombies, *prev)
-			}
-		} else {
-			// Left Z state (rare but possible if parent finally reaped).
-			prev.ZombieSince = time.Time{}
-		}
-
-		t.entries[pid] = prev
-	}
-
-	// ── 2. Register brand-new PIDs ───────────────────────────────────────────
-	for _, cur := range procs {
-		if _, known := t.entries[cur.PID]; known {
-			continue
-		}
-		e := &Entry{
-			PID:        cur.PID,
-			PPID:       cur.PPID,
-			Name:       cur.Name,
-			FirstSeen:  now,
-			ExitSignal: cur.ExitSignal,
-			Alive:      true,
-		}
-		if cur.State == "Z" {
-			e.ZombieSince = now
-			d.NewZombies = append(d.NewZombies, *e)
-		}
-		t.entries[cur.PID] = e
-	}
-
-	// ── 3. Prune entries that have been dead for a while ─────────────────────
-	// Keep dead entries for one full cycle so callers can inspect them; prune
-	// on the second visit.
-	for pid, e := range t.entries {
-		if !e.Alive {
-			delete(t.entries, pid)
+	// New processes.
+	for pid := range current {
+		if _, ok := t.processes[pid]; !ok {
+			appeared = append(appeared, pid)
 		}
 	}
 
-	return d
+	// Disappeared processes.
+	for pid, info := range t.processes {
+		if _, ok := current[pid]; !ok && info.Alive {
+			info.Alive = false
+			disappeared = append(disappeared, pid)
+		}
+	}
+
+	// Merge current snapshot into registry.
+	for pid, info := range current {
+		t.processes[pid] = info
+	}
+
+	return appeared, disappeared
 }
 
-// Snapshot returns a copy of the current entry map, keyed by PID.
-// Useful for debugging and API introspection.
-func (t *Tracker) Snapshot() map[int]Entry {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	out := make(map[int]Entry, len(t.entries))
-	for pid, e := range t.entries {
-		out[pid] = *e
+// All returns a copy of every process in the registry (alive and recently dead).
+func (t *Tracker) All() []*ProcessInfo {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make([]*ProcessInfo, 0, len(t.processes))
+	for _, p := range t.processes {
+		cp := *p
+		out = append(out, &cp)
 	}
 	return out
 }
 
-// Reset clears all tracking state.  Use in tests or after a monitored-target
-// reconfiguration where all PIDs are expected to be re-learned from scratch.
-func (t *Tracker) Reset() {
+// Live returns only currently-alive processes.
+func (t *Tracker) Live() []*ProcessInfo {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make([]*ProcessInfo, 0, len(t.processes))
+	for _, p := range t.processes {
+		if p.Alive {
+			cp := *p
+			out = append(out, &cp)
+		}
+	}
+	return out
+}
+
+// Get returns a single process record by PID.
+func (t *Tracker) Get(pid int) (*ProcessInfo, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	p, ok := t.processes[pid]
+	if !ok {
+		return nil, false
+	}
+	cp := *p
+	return &cp, true
+}
+
+// LiveCount returns the number of currently-alive tracked processes.
+func (t *Tracker) LiveCount() int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	n := 0
+	for _, p := range t.processes {
+		if p.Alive {
+			n++
+		}
+	}
+	return n
+}
+
+// Prune removes dead processes that were last seen more than maxAge ago.
+// Call periodically to prevent unbounded growth of the registry.
+func (t *Tracker) Prune(maxAge time.Duration) {
+	cutoff := time.Now().Add(-maxAge)
 	t.mu.Lock()
-	t.entries = make(map[int]*Entry)
-	t.mu.Unlock()
+	defer t.mu.Unlock()
+	for pid, p := range t.processes {
+		if !p.Alive && p.SeenAt.Before(cutoff) {
+			delete(t.processes, pid)
+		}
+	}
+}
+
+// ── /proc reading helpers ─────────────────────────────────────────────────────
+
+// readAllProcs scans /proc and returns a PID-keyed map of live process info.
+func readAllProcs() map[int]*ProcessInfo {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	result := make(map[int]*ProcessInfo, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 0 {
+			continue
+		}
+		info, err := readProcInfo(pid)
+		if err != nil {
+			continue
+		}
+		result[pid] = info
+	}
+	return result
+}
+
+// readProcInfo reads /proc/<pid>/status and /proc/<pid>/cmdline to build a
+// ProcessInfo. Returns an error if the process vanished mid-read.
+func readProcInfo(pid int) (*ProcessInfo, error) {
+	base := filepath.Join("/proc", strconv.Itoa(pid))
+
+	statusData, err := os.ReadFile(filepath.Join(base, "status"))
+	if err != nil {
+		return nil, err
+	}
+
+	info := &ProcessInfo{
+		PID:    pid,
+		Alive:  true,
+		SeenAt: time.Now().UTC(),
+	}
+
+	for _, line := range strings.Split(string(statusData), "\n") {
+		switch {
+		case strings.HasPrefix(line, "Name:"):
+			info.Name = strings.TrimSpace(strings.TrimPrefix(line, "Name:"))
+		case strings.HasPrefix(line, "State:"):
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				info.State = fields[1] // single character
+			}
+		case strings.HasPrefix(line, "PPid:"):
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				info.PPID, _ = strconv.Atoi(fields[1])
+			}
+		}
+	}
+
+	if info.Name == "" {
+		return nil, fmt.Errorf("no Name field for pid %d", pid)
+	}
+
+	// Read cmdline (argv joined by NUL bytes).
+	if data, err := os.ReadFile(filepath.Join(base, "cmdline")); err == nil {
+		info.Cmdline = strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
+	}
+
+	// Read exit signal from /proc/<pid>/stat field index 17 (0-based) after
+	// the closing ')'. This is valid while the process still exists.
+	if statData, err := os.ReadFile(filepath.Join(base, "stat")); err == nil {
+		info.TermSignal = parseExitSignal(string(statData))
+	}
+
+	return info, nil
+}
+
+// parseExitSignal extracts the exit_signal field from /proc/<pid>/stat.
+// The layout after the closing ')' is:
+//
+//	state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt
+//	utime stime cutime cstime priority nice num_threads itrealvalue starttime
+//	vsize rss rlim startcode endcode ...
+//
+// exit_signal is at index 15 (0-based) in the post-')' fields.
+func parseExitSignal(stat string) int {
+	end := strings.LastIndex(stat, ")")
+	if end < 0 {
+		return 0
+	}
+	fields := strings.Fields(stat[end+1:])
+	if len(fields) < 17 {
+		return 0
+	}
+	sig, _ := strconv.Atoi(fields[15])
+	return sig
 }

@@ -1,79 +1,78 @@
+//go:build linux
+
 package procwatch
 
 import (
-	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/eventstream"
+	"fmt"
+	"time"
+
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/events"
-	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/logger"
-	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/monitor"
-	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/policy"
 )
 
-// Notifier wires the procwatch Detector output into the rest of the FIS
-// pipeline: eventstream.Store for SSE delivery and logger for structured logs.
-//
-// Usage in the main poll loop (alongside the existing detector.Detector):
-//
-//	pwNotifier := procwatch.NewNotifier(procwatch.NewDetector(0), eventStore, log)
-//	...
-//	// inside runOnce:
-//	pwFaults := pwNotifier.Notify(snapshot, matches)
-//	for _, fault := range pwFaults {
-//	    // optionally route through policy/recovery engine
-//	}
-type Notifier struct {
-	detector   *Detector
-	eventStore *eventstream.Store
-	log        *logger.Logger
+// NotificationLevel mirrors event severity for the UI notification bar.
+type NotificationLevel string
+
+const (
+	LevelInfo    NotificationLevel = "INFO"
+	LevelWarning NotificationLevel = "WARNING"
+	LevelAlert   NotificationLevel = "ALERT"
+)
+
+// Notification is a formatted message ready for display in the live
+// notification bar of the React dashboard.
+type Notification struct {
+	ID        string            `json:"id"`
+	Timestamp time.Time         `json:"timestamp"`
+	Level     NotificationLevel `json:"level"`
+	Text      string            `json:"text"`
+	PID       int               `json:"pid,omitempty"`
+	FaultType events.FaultType  `json:"fault_type,omitempty"`
 }
 
-// NewNotifier creates a Notifier.
-//   - detector   : a procwatch.Detector (owns the Tracker inside)
-//   - eventStore : the shared eventstream.Store that drives SSE delivery
-//   - log        : structured logger; may be nil (log lines are skipped)
-func NewNotifier(
-	detector *Detector,
-	eventStore *eventstream.Store,
-	log *logger.Logger,
-) *Notifier {
-	return &Notifier{
-		detector:   detector,
-		eventStore: eventStore,
-		log:        log,
+// FormatLifecycle converts a LifecycleEvent into a display Notification.
+func FormatLifecycle(e LifecycleEvent) Notification {
+	return Notification{
+		ID:        e.ID,
+		Timestamp: e.Timestamp,
+		Level:     levelOf(e.Severity),
+		Text:      e.Message,
+		PID:       e.PID,
+		FaultType: e.Type,
 	}
 }
 
-// Notify runs the lifecycle detector for the current poll snapshot and
-// publishes any resulting FaultEvents to the eventstream and logger.
-//
-// It returns the emitted events so the caller can optionally route them
-// through the policy / recovery engine (mirrors the existing flow in main.go).
-func (n *Notifier) Notify(
-	snapshot monitor.Snapshot,
-	matches map[int]*policy.Target,
-) []events.FaultEvent {
-	faults := n.detector.Detect(snapshot, matches)
-
-	for _, fault := range faults {
-		// Publish to SSE stream (picked up by connected browser clients).
-		n.eventStore.Publish(eventstream.NewFaultEvent(fault))
-
-		// Structured log entry – same field schema as the existing fault path.
-		if n.log != nil {
-			n.log.Info("procwatch fault", map[string]interface{}{
-				"kind":               "procwatch_event",
-				"event_id":           fault.ID,
-				"correlation_id":     fault.CorrelationID,
-				"target":             fault.Target,
-				"pid":                fault.PID,
-				"parent_pid":         fault.ParentPID,
-				"type":               string(fault.Type),
-				"severity":           string(fault.Severity),
-				"message":            fault.Message,
-				"signal":             fault.Signal,
-				"zombie_duration_ns": int64(fault.ZombieDuration),
-			})
-		}
+// FormatProcessCreated emits an [INFO] notification when a new process appears.
+func FormatProcessCreated(p *ProcessInfo) Notification {
+	return Notification{
+		ID:        events.NewID(),
+		Timestamp: time.Now().UTC(),
+		Level:     LevelInfo,
+		Text:      fmt.Sprintf("[INFO] Child Process Created — %s (PID %d, PPID %d)", p.Name, p.PID, p.PPID),
+		PID:       p.PID,
+		FaultType: "process_created",
 	}
+}
 
-	return faults
+// FormatProcessExited emits an [INFO] notification when a process exits cleanly.
+func FormatProcessExited(p *ProcessInfo) Notification {
+	return Notification{
+		ID:        events.NewID(),
+		Timestamp: time.Now().UTC(),
+		Level:     LevelInfo,
+		Text:      fmt.Sprintf("[INFO] Process exited — %s (PID %d)", p.Name, p.PID),
+		PID:       p.PID,
+		FaultType: "process_exited",
+	}
+}
+
+// levelOf maps event severity to a notification level.
+func levelOf(s events.Severity) NotificationLevel {
+	switch s {
+	case events.SeverityCritical:
+		return LevelAlert
+	case events.SeverityWarn:
+		return LevelWarning
+	default:
+		return LevelInfo
+	}
 }

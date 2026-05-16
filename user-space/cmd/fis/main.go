@@ -86,14 +86,11 @@ func main() {
 
 	det := detector.New()
 
-	// --- procwatch: lifecycle-fault detector (zombie / orphan / signal-death) ---
-	pwDetector := procwatch.NewDetector(0) // 0 → default zombie-age threshold (3 s)
-	pwTracker := pwDetector.Tracker()      // expose tracker for /api/v1/procwatch/processes
-	pwNotifier := procwatch.NewNotifier(
-		pwDetector,
-		eventStore,
-		log,
-	)
+	// --- procwatch: lifecycle-monitoring subsystem ---
+	pwTracker := procwatch.NewTracker()
+	pwDetector := procwatch.NewDetector()
+	pwLifecycleStore := procwatch.NewLifecycleStore(500)
+	pwNotifStore := procwatch.NewNotificationStore(200)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -109,6 +106,8 @@ func main() {
 			Demos:            demoManager,
 			EBPFStore:        ebpfStore,
 			ProcwatchTracker: pwTracker,
+			LifecycleStore:   pwLifecycleStore,
+			NotifStore:       pwNotifStore,
 		})
 		server = &http.Server{
 			Addr:              *httpAddr,
@@ -166,22 +165,49 @@ func main() {
 			}
 		}
 
-		// ── procwatch lifecycle faults (zombie / orphan / parent-exit / signal) ──
-		pwFaults := pwNotifier.Notify(snapshot, matches)
-		for _, event := range pwFaults {
-			// Route lifecycle faults through the policy/recovery engine as well
-			// so that operators can configure restart/kill actions for them.
-			target := engine.TargetByName(event.Target)
+		// ── procwatch lifecycle monitoring ───────────────────────────────────
+		appeared, disappeared := pwTracker.Refresh()
+
+		for _, pid := range appeared {
+			if p, ok := pwTracker.Get(pid); ok {
+				pwNotifStore.Push(procwatch.FormatProcessCreated(p))
+			}
+		}
+		for _, pid := range disappeared {
+			if p, ok := pwTracker.Get(pid); ok {
+				pwNotifStore.Push(procwatch.FormatProcessExited(p))
+			}
+		}
+
+		lifecycleEvents := pwDetector.Analyse(pwTracker, appeared, disappeared)
+		for _, le := range lifecycleEvents {
+			pwLifecycleStore.Publish(le)
+			pwNotifStore.Push(procwatch.FormatLifecycle(le))
+
+			// Convert to core FaultEvent if it belongs to a managed target.
+			target := matches[le.PID]
 			if target == nil {
 				continue
 			}
+
+			fe := events.FaultEvent{
+				ID:        le.ID,
+				Timestamp: le.Timestamp,
+				Target:    target.Config.Name,
+				PID:       le.PID,
+				Type:      le.Type,
+				Severity:  le.Severity,
+				Message:   le.Message,
+			}
+
+			// Route through the policy/recovery engine.
 			policyCfg := engine.EffectivePolicy(target)
-			plan := engine.ActionForEvent(target, policyCfg, event)
-			if err := rec.Execute(event, plan); err != nil {
-				log.Error("procwatch action failed", map[string]interface{}{
+			plan := engine.ActionForEvent(target, policyCfg, fe)
+			if err := rec.Execute(fe, plan); err != nil {
+				log.Error("procwatch recovery failed", map[string]interface{}{
 					"error":  err.Error(),
-					"target": event.Target,
-					"type":   event.Type,
+					"target": fe.Target,
+					"type":   fe.Type,
 				})
 			}
 		}

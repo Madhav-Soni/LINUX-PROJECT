@@ -10,13 +10,15 @@ import (
 )
 
 type Dependencies struct {
-	ConfigPath      string
-	Runtime         *app.Runtime
-	Status          *app.StatusStore
-	Events          *eventstream.Store
-	Demos           *DemoManager
-	EBPFStore       *ebpf.Store
-	ProcwatchTracker *procwatch.Tracker // may be nil; enables /api/v1/procwatch/* routes
+	ConfigPath       string
+	Runtime          *app.Runtime
+	Status           *app.StatusStore
+	Events           *eventstream.Store
+	Demos            *DemoManager
+	EBPFStore        *ebpf.Store
+	ProcwatchTracker *procwatch.Tracker
+	LifecycleStore   *procwatch.LifecycleStore
+	NotifStore       *procwatch.NotificationStore
 }
 
 func NewHandler(deps Dependencies) http.Handler {
@@ -37,8 +39,8 @@ func NewHandler(deps Dependencies) http.Handler {
 	mux.HandleFunc("/api/v1/demos/", api.handleDemoByPID)
 	RegisterSyscallRoutes(mux, deps.EBPFStore)
 
-	// Procwatch lifecycle-monitoring routes (always registered; tracker may be nil).
-	RegisterProcwatchRoutes(mux, deps.Events, deps.ProcwatchTracker)
+	// Procwatch lifecycle-monitoring routes.
+	RegisterProcWatchRoutes(mux, deps.ProcwatchTracker, deps.LifecycleStore, deps.NotifStore)
 
 	return withCORS(mux)
 }
