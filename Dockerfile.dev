@@ -1,0 +1,16 @@
+FROM golang:1.24-bullseye
+
+RUN apt-get update && apt-get install -y \
+    linux-headers-generic \
+    iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+RUN cd user-space && \
+    go build -o fis ./cmd/fis && \
+    go build -o fisdemo ./cmd/fisdemo
+
+EXPOSE 8090
+CMD ["./user-space/fis", "-config", "user-space/configs/fis.json", "-http", ":8090"]
