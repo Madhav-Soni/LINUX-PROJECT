@@ -21,6 +21,9 @@ const fmtNs  = (ns) => {
   return`${(ns/1e9).toFixed(1)} s`;
 };
 
+// Guarantee a value is always an array — prevents .filter() crashes
+const toArr = (v) => Array.isArray(v) ? v : [];
+
 const LIFECYCLE = new Set(["zombie","orphan","signal_death","parent_exit"]);
 
 const FAULT_META = {
@@ -48,10 +51,10 @@ const ALL_MODES = [
   {value:"crash",        label:"crash        – clean exit(2)"},
 ];
 
-async function api(path, opts={}) {
+async function apiFetch(path, opts={}) {
   const r = await fetch(`${API_BASE}${path}`, {
     ...opts,
-    headers:{"Content-Type":"application/json",...opts.headers},
+    headers:{"Content-Type":"application/json",...(opts.headers||{})},
   });
   const ct = r.headers.get("content-type")||"";
   const data = ct.includes("application/json") ? await r.json() : null;
@@ -72,31 +75,36 @@ export default function App() {
   const [tab,setTab]             = useState("dashboard");
   const [stream,setStream]       = useState("connecting");
 
-  // global event log
   const [allEvents,setAllEvents] = useState([]);
   const [toasts,setToasts]       = useState([]);
 
-  // per-section data
   const [status,setStatus]       = useState(null);
   const [procs,setProcs]         = useState([]);
   const [pwEvents,setPwEvents]   = useState([]);
 
-  // demos
   const [demoMode,setDemoMode]   = useState("zombie");
   const [demoLoading,setDemoLoading] = useState(false);
-  const [demoMsg,setDemoMsg]     = useState(null); // {ok, text}
-  const [activeDemo,setActiveDemo] = useState([]); // [{pid,mode}]
+  const [demoMsg,setDemoMsg]     = useState(null);
+  const [activeDemo,setActiveDemo] = useState([]);
 
-  // config
   const [cfg,setCfg]             = useState("");
   const [cfgLoading,setCfgLoading] = useState(false);
   const [cfgMsg,setCfgMsg]       = useState(null);
 
-  // proc-monitor refresh trigger
-  const procRefTimer = useRef(null);
+  // Safe setter for processes — handles both raw array and summary object
+  const setProcsSafe = (val) => {
+    if (val && val.processes) {
+      setProcs(toArr(val.processes));
+    } else {
+      setProcs(toArr(val));
+    }
+  };
+
+  // ── Refresh ──────────────────────────────────────────────────────────────
   const refreshProcs = () => {
-    api("/api/v1/procwatch/processes")
-      .then(d=>setProcs(d.data||[])).catch(()=>{});
+    apiFetch("/api/v1/procwatch/processes")
+      .then(d=>{ if(d) setProcsSafe(d.data); })
+      .catch(()=>{});
   };
 
   // ── SSE ───────────────────────────────────────────────────────────────────
@@ -111,8 +119,7 @@ export default function App() {
         if(ev.kind==="fault"&&ev.fault&&LIFECYCLE.has(ev.fault.type)){
           const t={id:ev.id,ts:Date.now(),fault:ev.fault};
           setToasts(p=>[t,...p].slice(0,6));
-          setTimeout(()=>setToasts(p=>p.filter(x=>x.id!==t.id)),7000);
-          // Refresh the process table so zombie/orphan counts update immediately.
+          setTimeout(()=>setToasts(p=>p.filter(x=>x.id!==t.id)), 7000);
           refreshProcs();
         }
       }catch{}
@@ -124,86 +131,89 @@ export default function App() {
     return()=>{ alive=false; es.close(); setStream("closed"); };
   },[]);
 
-  // ── Poll status ──────────────────────────────────────────────────────────
+  // ── Polls ─────────────────────────────────────────────────────────────────
   useEffect(()=>{
     let alive=true;
-    const go=()=>api("/api/v1/status").then(d=>{ if(alive)setStatus(d.data); }).catch(()=>{});
-    go(); const t=setInterval(go,5000); return()=>{ alive=false; clearInterval(t); };
+    const go=()=>apiFetch("/api/v1/status")
+      .then(d=>{ if(alive&&d) setStatus(d.data); })
+      .catch(()=>{});
+    go();
+    const t=setInterval(go, 5000);
+    return()=>{ alive=false; clearInterval(t); };
   },[]);
 
-  // ── Poll procwatch processes (every 3 s) ─────────────────────────────────
   useEffect(()=>{
     let alive=true;
-    const go=()=>api("/api/v1/procwatch/processes").then(d=>{ if(alive)setProcs(d.data||[]); }).catch(()=>{});
-    go(); const t=setInterval(go,3000); return()=>{ alive=false; clearInterval(t); };
+    const go=()=>apiFetch("/api/v1/procwatch/processes")
+      .then(d=>{ if(alive&&d) setProcsSafe(d.data); })
+      .catch(()=>{});
+    go();
+    const t=setInterval(go, 3000);
+    return()=>{ alive=false; clearInterval(t); };
   },[]);
 
-  // ── Load initial procwatch events ────────────────────────────────────────
   useEffect(()=>{
-    api("/api/v1/procwatch/events?limit=100").then(d=>setPwEvents(d.data||[])).catch(()=>{});
+    apiFetch("/api/v1/procwatch/events?limit=100")
+      .then(d=>{ if(d) setPwEvents(toArr(d.data)); })
+      .catch(()=>{});
   },[]);
 
-  // ── Sync lifecycle events from SSE into pwEvents feed ───────────────────
   useEffect(()=>{
-    const lc = allEvents.filter(e=>e.kind==="fault"&&e.fault&&LIFECYCLE.has(e.fault.type));
+    apiFetch("/api/v1/config")
+      .then(d=>{ if(d) setCfg(JSON.stringify(d.data,null,2)); })
+      .catch(()=>{});
+  },[]);
+
+  // ── Sync ──────────────────────────────────────────────────────────────────
+  useEffect(()=>{
+    const lc = toArr(allEvents).filter(e=>e.kind==="fault"&&e.fault&&LIFECYCLE.has(e.fault.type));
     if(!lc.length) return;
     setPwEvents(prev=>{
-      const seen=new Set(prev.map(e=>e.id));
-      return [...lc.filter(e=>!seen.has(e.id)),...prev].slice(0,300);
+      const seen=new Set(toArr(prev).map(e=>e.id));
+      return [...lc.filter(e=>!seen.has(e.id)), ...toArr(prev)].slice(0,300);
     });
   },[allEvents]);
 
-  // ── Config ───────────────────────────────────────────────────────────────
-  useEffect(()=>{
-    api("/api/v1/config").then(d=>setCfg(JSON.stringify(d.data,null,2))).catch(()=>{});
-  },[]);
-
+  // ── Actions ───────────────────────────────────────────────────────────────
   const saveConfig = async()=>{
     setCfgMsg(null); setCfgLoading(true);
-    let p; try{ p=JSON.parse(cfg); }catch{ setCfgMsg({ok:false,text:"Must be valid JSON."}); setCfgLoading(false); return; }
+    let p; try{ p=JSON.parse(cfg); } catch{ setCfgMsg({ok:false,text:"Must be valid JSON."}); setCfgLoading(false); return; }
     try{
-      const d=await api("/api/v1/config",{method:"PUT",body:JSON.stringify(p)});
+      const d=await apiFetch("/api/v1/config",{method:"PUT",body:JSON.stringify(p)});
       setCfg(JSON.stringify(d.data,null,2)); setCfgMsg({ok:true,text:"Saved."});
     }catch(e){ setCfgMsg({ok:false,text:e.message}); }
     finally{ setCfgLoading(false); }
   };
 
-  // ── Start demo ───────────────────────────────────────────────────────────
   const startDemo = async()=>{
     setDemoMsg(null); setDemoLoading(true);
     try{
-      const d = await api("/api/v1/demos",{method:"POST",body:JSON.stringify({mode:demoMode})});
-      // Response shape: {success:true, data:{pid,mode}}
-      const info = d.data || d;
+      const d = await apiFetch("/api/v1/demos",{method:"POST",body:JSON.stringify({mode:demoMode})});
+      const info = (d&&d.data) ? d.data : d;
       setActiveDemo(p=>[...p,{pid:info.pid,mode:info.mode||demoMode}]);
-      setDemoMsg({ok:true,text:`✓ Started ${info.mode||demoMode} demo — PID ${info.pid}`});
-      // Switch to Proc Monitor tab so user sees the effect immediately.
+      setDemoMsg({ok:true,text:`✓ Started ${info.mode||demoMode} – PID ${info.pid}`});
       setTab("procwatch");
-      // Immediate refresh + trigger repeated refreshes for 15 s.
       refreshProcs();
-      let n=0;
-      const iv=setInterval(()=>{ refreshProcs(); if(++n>=7) clearInterval(iv); },2000);
-    }catch(e){
-      setDemoMsg({ok:false,text:`✗ ${e.message}`});
-    }finally{
-      setDemoLoading(false);
-    }
+      let n=0; const iv=setInterval(()=>{ refreshProcs(); if(++n>=7) clearInterval(iv); },2000);
+    }catch(e){ setDemoMsg({ok:false,text:`✗ ${e.message}`}); }
+    finally{ setDemoLoading(false); }
   };
 
   const stopDemo = async(pid)=>{
     try{
-      await api(`/api/v1/demos/${pid}`,{method:"DELETE"});
+      await apiFetch(`/api/v1/demos/${pid}`,{method:"DELETE"});
       setActiveDemo(p=>p.filter(x=>x.pid!==pid));
       setDemoMsg({ok:true,text:`Stopped PID ${pid}`});
     }catch(e){ setDemoMsg({ok:false,text:e.message}); }
   };
 
   // ── Derived ───────────────────────────────────────────────────────────────
+  const safeProcs = toArr(procs);
   const lifecycleEvents = useMemo(()=>
-    allEvents.filter(e=>e.kind==="fault"&&e.fault&&LIFECYCLE.has(e.fault.type)),
+    toArr(allEvents).filter(e=>e.kind==="fault"&&e.fault&&LIFECYCLE.has(e.fault.type)),
     [allEvents]);
-  const zombies = procs.filter(p=>p.zombie_since&&p.alive);
-  const alive   = procs.filter(p=>p.alive&&!p.zombie_since);
+  const zombies = safeProcs.filter(p=>p.zombie_since&&p.alive);
+  const alive   = safeProcs.filter(p=>p.alive&&!p.zombie_since);
 
   const fc = {hidden:{opacity:0,y:rm?0:14},show:{opacity:1,y:0,transition:{duration:0.3,ease:"easeOut"}}};
 
@@ -274,15 +284,15 @@ export default function App() {
               <div style={S.cardTitle}>Overview</div>
               <div style={S.statRow}>
                 <Stat label="Targets"   value={status?.targets?.length??"—"}/>
-                <Stat label="Processes" value={status?.targets?.reduce((s,t)=>s+(t.processes?.length||0),0)??"—"}/>
+                <Stat label="Processes" value={toArr(status?.targets)?.reduce((s,t)=>s+(toArr(t.processes)?.length||0),0)??"—"}/>
                 <Stat label="Zombies"   value={zombies.length} accent={zombies.length>0?"#ff6b6b":null}/>
-                <Stat label="Tracked"   value={procs.length}/>
+                <Stat label="Tracked"   value={safeProcs.length}/>
                 <Stat label="LC Faults" value={lifecycleEvents.length} accent={lifecycleEvents.length>0?"#ffa94d":null}/>
               </div>
-              {status?.targets?.map(t=>(
+              {toArr(status?.targets).map(t=>(
                 <div key={t.name} style={S.targetBox}>
                   <div style={S.targetName}>{t.name}</div>
-                  {t.processes?.map(p=>(
+                  {toArr(t.processes).map(p=>(
                     <div key={p.pid} style={S.prow}>
                       <span style={S.pname}>{p.name}</span>
                       <span style={S.pmeta}>PID {p.pid}</span>
@@ -299,7 +309,7 @@ export default function App() {
             <motion.div variants={fc} style={S.card}>
               <div style={S.cardTitle}>Recent Lifecycle Faults</div>
               {lifecycleEvents.length===0&&(
-                <div style={S.empty}>No lifecycle faults yet — use the Demos tab to trigger one.</div>
+                <div style={S.empty}>No lifecycle faults yet — use the <b>Demos</b> tab to trigger one.</div>
               )}
               {lifecycleEvents.slice(0,8).map(ev=><FaultCard key={ev.id} ev={ev}/>)}
             </motion.div>
@@ -309,71 +319,49 @@ export default function App() {
         {/* ── PROC MONITOR ───────────────────────────────────────────────── */}
         {tab==="procwatch"&&(
           <motion.div variants={{show:{transition:{staggerChildren:0.07}}}} initial="hidden" animate="show" style={S.grid}>
-
-            {/* Summary strip */}
             <motion.div variants={fc} style={{...S.card,gridColumn:"1/-1"}}>
               <div style={S.cardTitle}>Lifecycle Fault Summary</div>
               <div style={S.statRow}>
-                {Object.entries(
-                  pwEvents.reduce((acc,ev)=>{
-                    const t=ev.fault?.type||ev.kind;
-                    acc[t]=(acc[t]||0)+1; return acc;
-                  },{})
-                ).map(([type,count])=>(
-                  <Stat key={type}
-                    label={FAULT_META[type]?.label||type}
-                    value={count}
-                    icon={FAULT_META[type]?.icon}
-                    accent={FAULT_META[type]?.color}/>
+                {Object.entries(toArr(pwEvents).reduce((acc,ev)=>{
+                  const t=ev.fault?.type||ev.kind; acc[t]=(acc[t]||0)+1; return acc;
+                },{})).map(([type,count])=>(
+                  <Stat key={type} label={FAULT_META[type]?.label||type} value={count}
+                    icon={FAULT_META[type]?.icon} accent={FAULT_META[type]?.color}/>
                 ))}
                 {pwEvents.length===0&&<span style={S.empty}>No lifecycle events yet — launch a demo.</span>}
               </div>
             </motion.div>
 
-            {/* Zombie / live process table */}
             <motion.div variants={fc} style={S.card}>
               <div style={S.cardTitle}><span style={{color:"#ff6b6b"}}>☠</span> Zombie Processes ({zombies.length})</div>
               {zombies.length===0&&<div style={S.empty}>No zombies tracked.</div>}
               {zombies.map(p=>(
                 <div key={p.pid} style={S.prowFull}>
-                  <div>
-                    <span style={{...S.pname,color:"#ff6b6b"}}>{p.name}</span>
-                    <span style={S.pmeta}> PID {p.pid} · PPID {p.ppid}</span>
-                  </div>
+                  <div><span style={{...S.pname,color:"#ff6b6b"}}>{p.name}</span><span style={S.pmeta}> PID {p.pid} · PPID {p.ppid}</span></div>
                   <div style={S.pmeta}>since {fmtTs(p.zombie_since)}</div>
                 </div>
               ))}
-
               <div style={{marginTop:20}}>
                 <div style={S.cardTitle}><span style={{color:"#74c0fc"}}>●</span> Live Tracked ({alive.length})</div>
                 {alive.length===0&&<div style={S.empty}>No tracked processes.</div>}
                 <div style={{display:"flex",flexDirection:"column",gap:2}}>
                   {alive.slice(0,40).map(p=>(
                     <div key={p.pid} style={{...S.prow,gap:16}}>
-                      <span style={S.pname}>{p.name}</span>
-                      <span style={S.pmeta}>PID {p.pid}</span>
-                      <span style={S.pmeta}>PPID {p.ppid}</span>
+                      <span style={S.pname}>{p.name}</span><span style={S.pmeta}>PID {p.pid}</span><span style={S.pmeta}>PPID {p.ppid}</span>
                       <span style={{...S.pmeta,color:"#444"}}>seen {fmtTs(p.first_seen)}</span>
                     </div>
                   ))}
-                  {alive.length>40&&<div style={S.pmeta}>…and {alive.length-40} more</div>}
                 </div>
               </div>
             </motion.div>
 
-            {/* Live event feed */}
             <motion.div variants={fc} style={S.card}>
               <div style={S.cardTitle}>Live Lifecycle Feed</div>
-              {pwEvents.length===0&&(
-                <div style={S.empty}>No events yet.<br/>Start a demo from the <b>Demos</b> tab.</div>
-              )}
+              {pwEvents.length===0&&<div style={S.empty}>No events yet.<br/>Start a demo from the <b>Demos</b> tab.</div>}
               <div style={S.feed}>
                 <AnimatePresence initial={false}>
-                  {pwEvents.slice(0,60).map(ev=>(
-                    <motion.div key={ev.id}
-                      initial={{opacity:0,height:0}} animate={{opacity:1,height:"auto"}}
-                      exit={{opacity:0,height:0}} transition={{duration:0.22}}
-                    >
+                  {toArr(pwEvents).slice(0,60).map(ev=>(
+                    <motion.div key={ev.id} initial={{opacity:0,height:0}} animate={{opacity:1,height:"auto"}} exit={{opacity:0,height:0}} transition={{duration:0.22}}>
                       <FaultCard ev={ev}/>
                     </motion.div>
                   ))}
@@ -389,11 +377,7 @@ export default function App() {
             <div style={S.cardTitle}>All Events ({allEvents.length})</div>
             {allEvents.length===0&&<div style={S.empty}>No events yet.</div>}
             <div style={S.feed}>
-              {allEvents.slice(0,150).map(ev=>
-                ev.kind==="fault"
-                  ?<FaultCard key={ev.id} ev={ev}/>
-                  :<ActionCard key={ev.id} ev={ev}/>
-              )}
+              {toArr(allEvents).slice(0,150).map(ev=>ev.kind==="fault"?<FaultCard key={ev.id} ev={ev}/>:<ActionCard key={ev.id} ev={ev}/>)}
             </div>
           </motion.div>
         )}
@@ -402,77 +386,28 @@ export default function App() {
         {tab==="demos"&&(
           <motion.div variants={fc} initial="hidden" animate="show" style={S.card}>
             <div style={S.cardTitle}>Demo Controls</div>
-            <p style={{...S.pmeta,marginBottom:16,lineHeight:1.6}}>
-              Select a lifecycle fault scenario and click <b>Launch Demo</b>.
-              The backend executes <code style={{color:"#74c0fc"}}>fisdemo -mode &lt;mode&gt;</code> and
-              procwatch automatically detects the resulting fault within 2–4 s.
-              Results appear in the <b>Proc Monitor</b> tab and as toast notifications.
+            <p style={{...S.pmeta,marginBottom:16,lineHeight:1.7}}>
+              Select a scenario and click <b>Launch Demo</b>. Results appear in <b>Proc Monitor</b>.
             </p>
-
             <div style={S.demoGrid}>
               <div>
                 <div style={S.label}>Fault scenario</div>
                 <select value={demoMode} onChange={e=>setDemoMode(e.target.value)} style={S.sel}>
-                  {ALL_MODES.map(m=>(
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
+                  {ALL_MODES.map(m=>(<option key={m.value} value={m.value}>{m.label}</option>))}
                 </select>
               </div>
-              <button
-                onClick={startDemo}
-                disabled={demoLoading}
-                style={{...S.btnPrimary,...(demoLoading?{opacity:0.6,cursor:"not-allowed"}:{})}}
-              >
+              <button onClick={startDemo} disabled={demoLoading} style={{...S.btnPrimary,...(demoLoading?{opacity:0.6,cursor:"not-allowed"}:{})}}>
                 {demoLoading?"Launching…":"⚡ Launch Demo"}
               </button>
             </div>
-
-            {demoMsg&&(
-              <div style={{
-                ...S.msg,
-                background: demoMsg.ok?"#0d1f0d":"#1f0d0d",
-                color: demoMsg.ok?"#51cf66":"#ff6b6b",
-                border: `1px solid ${demoMsg.ok?"#1a4a1a":"#4a1a1a"}`,
-              }}>
-                {demoMsg.text}
-              </div>
-            )}
-
-            {/* Active demos */}
+            {demoMsg&&(<div style={{...S.msgBox,background:demoMsg.ok?"#0d1f0d":"#1f0d0d",color:demoMsg.ok?"#51cf66":"#ff6b6b",border:`1px solid ${demoMsg.ok?"#1a4a1a":"#4a1a1a"}`}}>{demoMsg.text}</div>)}
             <div style={{marginTop:20}}>
               <div style={S.label}>Active demo processes ({activeDemo.length})</div>
-              {activeDemo.length===0&&(
-                <div style={S.empty}>No demos running. Launch one above.</div>
-              )}
+              {activeDemo.length===0&&<div style={S.empty}>No demos running.</div>}
               {activeDemo.map(d=>(
                 <div key={d.pid} style={S.prowFull}>
-                  <div>
-                    <span style={{...S.pname,color:"#7c6af7"}}>{d.mode}</span>
-                    <span style={S.pmeta}> PID {d.pid}</span>
-                  </div>
+                  <div><span style={{...S.pname,color:"#7c6af7"}}>{d.mode}</span><span style={S.pmeta}> PID {d.pid}</span></div>
                   <button onClick={()=>stopDemo(d.pid)} style={S.btnDanger}>Stop</button>
-                </div>
-              ))}
-            </div>
-
-            {/* What to expect */}
-            <div style={{marginTop:28,padding:16,background:"#0d0d18",borderRadius:8,border:"1px solid #1e1e2e"}}>
-              <div style={{...S.label,marginBottom:12}}>Expected behaviour per mode</div>
-              {[
-                ["zombie","Child exits instantly. Parent never calls wait(). Child appears as state Z. Toast + zombie table update within 2 s."],
-                ["orphan","Parent exits. Child re-parents to PID 1 (init). Orphan event appears in feed."],
-                ["parent-nowait","Child exits at T+1 s, parent at T+5 s. Brief zombie window detected."],
-                ["sigkill","Parent sends SIGKILL (signal 9) to child after 2 s. Critical signal_death event."],
-                ["sigterm","Parent sends SIGTERM (signal 15) to child after 2 s. Signal_death event."],
-                ["sigsegv","Process crashes with SIGSEGV (signal 11). Signal_death warn event."],
-                ["sigabrt","Process sends SIGABRT to itself (signal 6). Signal_death warn event."],
-                ["cpu","Busy-loop. CPU spike fault if above threshold."],
-                ["mem","Allocates memory. Memory fault if above threshold."],
-                ["crash","Calls os.Exit(2) after 2 s. Crash fault + restart action."],
-              ].map(([m,desc])=>(
-                <div key={m} style={{marginBottom:10}}>
-                  <code style={{...S.code,display:"inline-block",marginBottom:4}}>{m}</code>
-                  <div style={{...S.pmeta,lineHeight:1.5}}>{desc}</div>
                 </div>
               ))}
             </div>
@@ -483,21 +418,11 @@ export default function App() {
         {tab==="config"&&(
           <motion.div variants={fc} initial="hidden" animate="show" style={S.card}>
             <div style={S.cardTitle}>Config Editor</div>
-            <textarea value={cfg} onChange={e=>setCfg(e.target.value)}
-              style={S.ta} rows={24} spellCheck={false}/>
-            {cfgMsg&&(
-              <div style={{...S.msg,
-                background:cfgMsg.ok?"#0d1f0d":"#1f0d0d",
-                color:cfgMsg.ok?"#51cf66":"#ff6b6b",
-                border:`1px solid ${cfgMsg.ok?"#1a4a1a":"#4a1a1a"}`
-              }}>{cfgMsg.text}</div>
-            )}
+            <textarea value={cfg} onChange={e=>setCfg(e.target.value)} style={S.ta} rows={24} spellCheck={false}/>
+            {cfgMsg&&(<div style={{...S.msgBox,background:cfgMsg.ok?"#0d1f0d":"#1f0d0d",color:cfgMsg.ok?"#51cf66":"#ff6b6b",border:`1px solid ${cfgMsg.ok?"#1a4a1a":"#4a1a1a"}`}}>{cfgMsg.text}</div>)}
             <div style={{display:"flex",gap:12,marginTop:12}}>
-              <button onClick={saveConfig} disabled={cfgLoading} style={S.btnPrimary}>
-                {cfgLoading?"Saving…":"Save Config"}
-              </button>
-              <button onClick={()=>api("/api/v1/config").then(d=>setCfg(JSON.stringify(d.data,null,2))).catch(()=>{})}
-                style={S.btnSecondary}>Reload</button>
+              <button onClick={saveConfig} disabled={cfgLoading} style={S.btnPrimary}>{cfgLoading?"Saving…":"Save Config"}</button>
+              <button onClick={()=>apiFetch("/api/v1/config").then(d=>{if(d)setCfg(JSON.stringify(d.data,null,2))}).catch(()=>{})} style={S.btnSecondary}>Reload</button>
             </div>
           </motion.div>
         )}
@@ -525,8 +450,7 @@ function FaultCard({ev}){
   return(
     <div style={{...S.evCard,borderLeft:`3px solid ${SEV[sev]||"#555"}`}}>
       <div style={S.evHead}>
-        <span style={{fontSize:15}}>{m.icon}</span>
-        <span style={{color:m.color,fontWeight:600}}>{m.label}</span>
+        <span style={{fontSize:15}}>{m.icon}</span><span style={{color:m.color,fontWeight:600}}>{m.label}</span>
         <span style={{...S.sevChip,background:(SEV[sev]||"#555")+"30",color:SEV[sev]||"#888"}}>{sev}</span>
         {f.target&&f.target!=="untracked"&&<span style={{...S.pmeta,color:"#7c6af7"}}>{f.target}</span>}
         <span style={{marginLeft:"auto",...S.pmeta}}>{fmtTs(ev.timestamp||f.timestamp)}</span>
@@ -547,8 +471,7 @@ function ActionCard({ev}){
   return(
     <div style={{...S.evCard,borderLeft:"3px solid #51cf66"}}>
       <div style={S.evHead}>
-        <span>⚙</span>
-        <span style={{color:"#51cf66",fontWeight:600}}>{a.action}</span>
+        <span>⚙</span><span style={{color:"#51cf66",fontWeight:600}}>{a.action}</span>
         <span style={{...S.sevChip,background:"#0a2a0a",color:"#51cf66"}}>{a.result}</span>
         <span style={{marginLeft:"auto",...S.pmeta}}>{fmtTs(ev.timestamp)}</span>
       </div>
@@ -556,13 +479,10 @@ function ActionCard({ev}){
         {a.target&&<span>target <b>{a.target}</b></span>}
         {a.pid&&<span>PID <b>{a.pid}</b></span>}
         {a.reason&&<span>{a.reason}</span>}
-        {a.new_pid&&<span>new PID <b>{a.new_pid}</b></span>}
       </div>
     </div>
   );
 }
-
-// ── Styles ────────────────────────────────────────────────────────────────────
 
 const S = {
   root:{minHeight:"100vh",background:"#0d0d14",color:"#e0e0e0",fontFamily:"'JetBrains Mono','Fira Code',monospace",fontSize:13},
@@ -598,7 +518,7 @@ const S = {
   btnPrimary:{background:"#7c6af7",color:"#fff",border:"none",padding:"10px 22px",borderRadius:6,cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:700,whiteSpace:"nowrap"},
   btnSecondary:{background:"#1a1a2e",color:"#bbb",border:"1px solid #2a2a3e",padding:"8px 18px",borderRadius:6,cursor:"pointer",fontFamily:"inherit",fontSize:13},
   btnDanger:{background:"#2a0d0d",color:"#ff6b6b",border:"1px solid #4a1a1a",padding:"5px 12px",borderRadius:6,cursor:"pointer",fontFamily:"inherit",fontSize:12},
-  msg:{borderRadius:6,padding:"10px 14px",marginTop:10,fontSize:13,fontWeight:500},
+  msgBox:{borderRadius:6,padding:"10px 14px",marginTop:10,fontSize:13,fontWeight:500},
   ta:{width:"100%",background:"#0a0a12",border:"1px solid #1a1a2a",color:"#e0e0e0",fontFamily:"inherit",fontSize:11,borderRadius:6,padding:12,resize:"vertical",boxSizing:"border-box"},
   code:{background:"#0a0a12",color:"#74c0fc",padding:"2px 6px",borderRadius:4,fontSize:12},
   toastBox:{position:"fixed",top:20,right:20,zIndex:9999,display:"flex",flexDirection:"column",gap:10,maxWidth:370,pointerEvents:"none"},
