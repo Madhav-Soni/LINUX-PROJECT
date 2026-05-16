@@ -61,7 +61,7 @@ export default function App() {
   const [allEvents,setAllEvents] = useState([]);
   const [notifications,setNotifications] = useState([]);
   const [status,setStatus] = useState(null);
-  const [processes,setProcesses] = useState([]);
+  const [processes, setProcesses] = useState([]);
   const [pwEvents,setPwEvents] = useState([]);
   const [config, setConfig] = useState("");
   const [configLoading,setConfigLoading] = useState(false);
@@ -113,7 +113,7 @@ export default function App() {
   useEffect(()=>{
     let active=true;
     const load=async()=>{
-      try{ const d=await fetchJSON("/api/v1/procwatch/processes"); if(active) setProcesses(d.data||[]); }catch{}
+      try{ const data = await fetchJSON("/api/v1/procwatch/processes"); if(active) setProcesses(data.data.processes || []); }catch{}
     };
     load();
     const t=setInterval(load,3000);
