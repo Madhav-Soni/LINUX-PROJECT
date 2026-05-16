@@ -7,6 +7,10 @@ import (
 	"time"
 
 	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/events"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/eventstream"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/logger"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/monitor"
+	"github.com/Madhav-Soni/LINUX-PROJECT/user-space/internal/policy"
 )
 
 // NotificationLevel mirrors event severity for the UI notification bar.
@@ -18,8 +22,7 @@ const (
 	LevelAlert   NotificationLevel = "ALERT"
 )
 
-// Notification is a formatted message ready for display in the live
-// notification bar of the React dashboard.
+// Notification is a formatted message ready for display.
 type Notification struct {
 	ID        string            `json:"id"`
 	Timestamp time.Time         `json:"timestamp"`
@@ -29,8 +32,39 @@ type Notification struct {
 	FaultType events.FaultType  `json:"fault_type,omitempty"`
 }
 
+// Notifier bridges lifecycle events from the Detector into the event store
+// and the logger.
+type Notifier struct {
+	detector *Detector
+	events   *eventstream.Store
+	log      *logger.Logger
+}
+
+// NewNotifier returns a Notifier.
+func NewNotifier(d *Detector, s *eventstream.Store, l *logger.Logger) *Notifier {
+	return &Notifier{
+		detector: d,
+		events:   s,
+		log:      l,
+	}
+}
+
+// Notify runs detection and publishes any found lifecycle faults.
+func (n *Notifier) Notify(snapshot monitor.Snapshot, matches map[int]*policy.Target) []events.FaultEvent {
+	faults := n.detector.Detect(snapshot, matches)
+	for _, f := range faults {
+		n.events.Publish(eventstream.NewFaultEvent(f))
+		n.log.Info("lifecycle fault", map[string]interface{}{
+			"pid":     f.PID,
+			"type":    f.Type,
+			"message": f.Message,
+		})
+	}
+	return faults
+}
+
 // FormatLifecycle converts a LifecycleEvent into a display Notification.
-func FormatLifecycle(e LifecycleEvent) Notification {
+func FormatLifecycle(e events.FaultEvent) Notification {
 	return Notification{
 		ID:        e.ID,
 		Timestamp: e.Timestamp,
@@ -41,7 +75,7 @@ func FormatLifecycle(e LifecycleEvent) Notification {
 	}
 }
 
-// FormatProcessCreated emits an [INFO] notification when a new process appears.
+// FormatProcessCreated emits an [INFO] notification.
 func FormatProcessCreated(p *ProcessInfo) Notification {
 	return Notification{
 		ID:        events.NewID(),
@@ -53,7 +87,7 @@ func FormatProcessCreated(p *ProcessInfo) Notification {
 	}
 }
 
-// FormatProcessExited emits an [INFO] notification when a process exits cleanly.
+// FormatProcessExited emits an [INFO] notification.
 func FormatProcessExited(p *ProcessInfo) Notification {
 	return Notification{
 		ID:        events.NewID(),

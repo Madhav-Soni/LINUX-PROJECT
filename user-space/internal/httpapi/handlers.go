@@ -145,33 +145,42 @@ func (api *API) handleEventsStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) handleDemos(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
-		return
-	}
+	switch r.Method {
+	case http.MethodGet:
+		// List active demos.
+		writeJSON(w, http.StatusOK, map[string]interface{}{"data": api.demos.List()})
 
-	var req demoRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Invalid JSON payload.", nil)
-		return
-	}
-
-	if req.Mode == "" {
-		writeError(w, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "mode is required.", []fieldError{{Field: "mode", Message: "mode is required"}})
-		return
-	}
-
-	pid, mode, err := api.demos.Start(req.Mode, req.MemMB)
-	if err != nil {
-		if errors.Is(err, errDemoNotFound) {
-			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Demo binary not available.", nil)
+	case http.MethodPost:
+		var req demoRequest
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Invalid JSON payload.", nil)
 			return
 		}
-		writeError(w, http.StatusUnprocessableEntity, "VALIDATION_ERROR", err.Error(), nil)
-		return
-	}
+		if req.Mode == "" {
+			writeError(w, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "mode is required.",
+				[]fieldError{{Field: "mode", Message: "mode is required"}})
+			return
+		}
 
-	writeJSON(w, http.StatusCreated, map[string]interface{}{"data": map[string]interface{}{"pid": pid, "mode": mode}})
+		pid, mode, err := api.demos.Start(req.Mode, req.MemMB)
+		if err != nil {
+			if errors.Is(err, errDemoNotFound) {
+				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR",
+					"Demo binary not found. Ensure fisdemo is built and on PATH or at /app/user-space/fisdemo.", nil)
+				return
+			}
+			writeError(w, http.StatusUnprocessableEntity, "VALIDATION_ERROR", err.Error(), nil)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, map[string]interface{}{
+			"success": true,
+			"data":    map[string]interface{}{"pid": pid, "mode": mode},
+		})
+
+	default:
+		methodNotAllowed(w)
+	}
 }
 
 func (api *API) handleDemoByPID(w http.ResponseWriter, r *http.Request) {

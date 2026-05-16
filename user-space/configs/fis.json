@@ -29,17 +29,17 @@
         "cmdline_contains": "",
         "regex": ""
       },
-      "command": [
-        "./fisdemo",
-        "-mode",
-        "cpu"
-      ],
+      "command": ["./fisdemo", "-mode", "cpu"],
       "cpu_spike_percent": 50,
       "memory_overuse_bytes": 15000,
       "actions": {
         "crash": "restart",
         "cpu_spike": "quarantine",
-        "memory_overuse": "kill"
+        "memory_overuse": "kill",
+        "zombie": "none",
+        "orphan": "none",
+        "signal_death": "none",
+        "parent_exit": "none"
       },
       "restart": {
         "max_attempts": 5,

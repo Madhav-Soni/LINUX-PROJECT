@@ -86,18 +86,24 @@ func main() {
 
 	det := detector.New()
 
-	// --- procwatch: lifecycle-monitoring subsystem ---
-	pwTracker := procwatch.NewTracker()
-	pwDetector := procwatch.NewDetector()
+	// --- procwatch: lifecycle-fault detector (zombie / orphan / signal-death) ---
+	pwDetector := procwatch.NewDetector(0) // 0 → default zombie-age threshold (3 s)
+	pwTracker := pwDetector.Tracker()      // expose tracker for /api/v1/procwatch/processes
 	pwLifecycleStore := procwatch.NewLifecycleStore(500)
 	pwNotifStore := procwatch.NewNotificationStore(200)
+	pwNotifier := procwatch.NewNotifier(
+		pwDetector,
+		eventStore,
+		log,
+	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	var server *http.Server
 	if *httpAddr != "" {
-		demoManager := httpapi.NewDemoManager("fisdemo")
+		// Pass "" so DemoManager uses its own resolution logic (PATH, /app/user-space/, ./).
+		demoManager := httpapi.NewDemoManager("")
 		handler := httpapi.NewHandler(httpapi.Dependencies{
 			ConfigPath:       *configPath,
 			Runtime:          runtime,
@@ -165,49 +171,27 @@ func main() {
 			}
 		}
 
-		// ── procwatch lifecycle monitoring ───────────────────────────────────
-		appeared, disappeared := pwTracker.Refresh()
-
-		for _, pid := range appeared {
-			if p, ok := pwTracker.Get(pid); ok {
-				pwNotifStore.Push(procwatch.FormatProcessCreated(p))
+		// ── procwatch lifecycle faults (zombie / orphan / parent-exit / signal) ──
+		// pwNotifier.Notify publishes events to the SSE store internally.
+		// We also route faults for known policy targets through the
+		// policy/recovery engine so operators can configure actions.
+		pwFaults := pwNotifier.Notify(snapshot, matches)
+		for _, event := range pwFaults {
+			// Only route through recovery if a policy target matched.
+			if event.Target == "" || event.Target == "untracked" {
+				continue
 			}
-		}
-		for _, pid := range disappeared {
-			if p, ok := pwTracker.Get(pid); ok {
-				pwNotifStore.Push(procwatch.FormatProcessExited(p))
-			}
-		}
-
-		lifecycleEvents := pwDetector.Analyse(pwTracker, appeared, disappeared)
-		for _, le := range lifecycleEvents {
-			pwLifecycleStore.Publish(le)
-			pwNotifStore.Push(procwatch.FormatLifecycle(le))
-
-			// Convert to core FaultEvent if it belongs to a managed target.
-			target := matches[le.PID]
+			target := engine.TargetByName(event.Target)
 			if target == nil {
 				continue
 			}
-
-			fe := events.FaultEvent{
-				ID:        le.ID,
-				Timestamp: le.Timestamp,
-				Target:    target.Config.Name,
-				PID:       le.PID,
-				Type:      le.Type,
-				Severity:  le.Severity,
-				Message:   le.Message,
-			}
-
-			// Route through the policy/recovery engine.
 			policyCfg := engine.EffectivePolicy(target)
-			plan := engine.ActionForEvent(target, policyCfg, fe)
-			if err := rec.Execute(fe, plan); err != nil {
-				log.Error("procwatch recovery failed", map[string]interface{}{
+			plan := engine.ActionForEvent(target, policyCfg, event)
+			if err := rec.Execute(event, plan); err != nil {
+				log.Error("procwatch action failed", map[string]interface{}{
 					"error":  err.Error(),
-					"target": fe.Target,
-					"type":   fe.Type,
+					"target": event.Target,
+					"type":   event.Type,
 				})
 			}
 		}

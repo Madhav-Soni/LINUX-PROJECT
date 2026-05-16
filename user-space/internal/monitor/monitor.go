@@ -2,7 +2,6 @@ package monitor
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,6 +25,7 @@ type ProcessSnapshot struct {
 	Cmdline     string
 	CPUJiffies  uint64
 	MemoryBytes uint64
+	ExitSignal  int // the exit signal (field 38 in /proc/pid/stat)
 }
 
 // ReadSnapshot reads a full system snapshot from the /proc filesystem.
@@ -108,7 +108,7 @@ func readProcess(pid int) (ProcessSnapshot, error) {
 		return ProcessSnapshot{}, err
 	}
 
-	cpuJiffies, err := parseCPUJiffies(string(statData))
+	cpuJiffies, exitSignal, err := parseCPUStat(string(statData))
 	if err != nil {
 		return ProcessSnapshot{}, err
 	}
@@ -125,6 +125,7 @@ func readProcess(pid int) (ProcessSnapshot, error) {
 		Cmdline:     cmdline,
 		CPUJiffies:  cpuJiffies,
 		MemoryBytes: memBytes,
+		ExitSignal:  exitSignal,
 	}, nil
 }
 
@@ -160,22 +161,17 @@ func parseStatus(data string) (name, state string, ppid int, memBytes uint64) {
 	return name, state, ppid, memBytes
 }
 
-func parseCPUJiffies(data string) (uint64, error) {
+func parseCPUStat(data string) (jiffies uint64, exitSignal int, err error) {
 	end := strings.LastIndex(data, ")")
 	if end == -1 || end+2 >= len(data) {
-		return 0, errors.New("invalid stat format")
+		return 0, 0, errors.New("invalid stat format")
 	}
 	fields := strings.Fields(data[end+2:])
-	if len(fields) < 13 {
-		return 0, errors.New("stat fields missing")
+	if len(fields) < 36 { // need up to field 38 (38 - 2 = 36)
+		return 0, 0, errors.New("stat fields missing")
 	}
-	utime, err := strconv.ParseUint(fields[11], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("utime: %w", err)
-	}
-	stime, err := strconv.ParseUint(fields[12], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("stime: %w", err)
-	}
-	return utime + stime, nil
+	utime, _ := strconv.ParseUint(fields[11], 10, 64)
+	stime, _ := strconv.ParseUint(fields[12], 10, 64)
+	sig, _ := strconv.Atoi(fields[35]) // exit_signal is the 38th field overall, which is 38-3=35th after the (name)
+	return utime + stime, sig, nil
 }
