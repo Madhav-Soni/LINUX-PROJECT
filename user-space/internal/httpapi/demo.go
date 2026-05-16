@@ -3,6 +3,8 @@ package httpapi
 import (
 	"errors"
 	"fmt"
+	"encoding/json"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -129,4 +131,58 @@ func resolveDemoBinary(binary string) (string, error) {
 
 func normalizeMode(mode string) string {
 	return strings.ToLower(mode)
+}
+
+type DemoRequest struct {
+	Mode string `json:"mode"`
+}
+
+func StartDemoHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req DemoRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	switch req.Mode {
+	case
+		"cpu",
+		"mem",
+		"crash",
+		"zombie",
+		"orphan",
+		"parent-nowait",
+		"sigkill",
+		"sigterm",
+		"sigsegv",
+		"sigabrt":
+	default:
+		http.Error(w, fmt.Sprintf("unsupported mode: %s", req.Mode), http.StatusBadRequest)
+		return
+	}
+
+	cmd := exec.Command(
+		"/app/user-space/fisdemo",
+		"-mode",
+		req.Mode,
+	)
+
+	out, err := cmd.CombinedOutput()
+
+	resp := map[string]any{
+		"mode":   req.Mode,
+		"output": string(out),
+	}
+
+	if err != nil {
+		resp["error"] = err.Error()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
